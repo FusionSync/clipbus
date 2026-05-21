@@ -16,6 +16,8 @@ retrieval; `clipbus` owns native selection events.
 - `SelectionRequest`, `SelectionNotify`, `SelectionClear`, and property writes
 - pending request tracking and request timeout failure
 - requestor-side `TARGETS` and target data reads from an external owner
+- XFixes owner-change notifications when the server supports XFixes
+- X11 `INCR` receive/send for large target payloads
 
 The host owns:
 
@@ -52,6 +54,22 @@ local X11 app requests a target
   -> clipbus writes the X11 property and sends SelectionNotify
 ```
 
+Requestor flow:
+
+```text
+host requests current target list
+  -> clipbus sends ConvertSelection(CLIPBOARD, TARGETS)
+  -> external owner writes Atom list
+  -> clipbus resolves Atom names
+  -> clipbus_target_list_cb(user, request_id, status, targets, count)
+
+host requests one target payload
+  -> clipbus sends ConvertSelection(CLIPBOARD, target)
+  -> external owner writes bytes or starts INCR
+  -> clipbus reads bounded bytes
+  -> clipbus_target_data_cb(user, request_id, target, status, data, len)
+```
+
 ## Current Slice
 
 Implemented in the first slice:
@@ -66,13 +84,16 @@ Implemented in the first slice:
 - complete or fail pending X11 requests
 - request `TARGETS` from the current external owner
 - request bounded target data from the current external owner
+- receive external `INCR` target payloads
+- send owner-side `INCR` target payloads
+- notify `targets_changed` from XFixes selection owner events when available
 - request timeout cleanup
 
 Next slices:
 
-- XFixes owner-change monitor for external clipboard changes
-- INCR for large inline payloads
-- better install/export targets after CMake is available in CI
+- real X server integration smoke tests
+- PRIMARY selection support if FusionDesk needs it
+- Wayland/portal backend if Linux scope expands beyond X11
 
 ## Packaging
 

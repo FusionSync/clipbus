@@ -13,7 +13,11 @@ Current scope:
 
 - X11 `CLIPBOARD` ownership through XCB/X11 protocol bindings
 - `TARGETS` response
+- external owner `TARGETS` reads
+- bounded external target data reads
 - delayed target rendering through `clipbus_target_request_cb`
+- X11 `INCR` receive/send for large target payloads
+- XFixes owner-change notification when available
 - owner-loss and diagnostics callbacks
 
 Out of scope for this library:
@@ -65,3 +69,7 @@ CMake consumers may also use:
 find_package(Clipbus REQUIRED)
 target_link_libraries(app PRIVATE Clipbus::Clipbus)
 ```
+
+For a live X11 owner/requestor smoke, build `examples/x11_self_smoke.c` against
+an installed or staged `libclipbus`. The example publishes `text/plain`, reads
+it back through the requestor API, and forces the payload through X11 `INCR`.

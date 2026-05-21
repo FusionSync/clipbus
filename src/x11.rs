@@ -3,10 +3,15 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::xfixes::{
+    ConnectionExt as XfixesConnectionExt, SelectionEventMask,
+    SelectionNotifyEvent as XfixesSelectionNotifyEvent,
+};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as XprotoConnectionExt, CreateWindowAux, EventMask, PropMode,
-    SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as XprotoConnectionExt,
+    CreateWindowAux, EventMask, PropMode, Property, PropertyNotifyEvent, SelectionNotifyEvent,
+    SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -14,6 +19,7 @@ use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
 const CLIPBUS_X11_COPY_FROM_PARENT: u8 = 0;
 const CLIPBUS_X11_CURRENT_TIME: u32 = 0;
+const CLIPBUS_X11_INCR_CHUNK_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy)]
 struct Atoms {
@@ -50,6 +56,22 @@ enum PendingRequest {
         max_bytes: u64,
         deadline: Instant,
     },
+    ExternalIncrData {
+        property: Atom,
+        native_target: String,
+        max_bytes: u64,
+        data: Vec<u8>,
+        deadline: Instant,
+    },
+    OwnerIncrData {
+        requestor: Window,
+        property: Atom,
+        target_atom: Atom,
+        data: Vec<u8>,
+        offset: usize,
+        chunk_size: usize,
+        deadline: Instant,
+    },
 }
 
 impl PendingRequest {
@@ -57,7 +79,9 @@ impl PendingRequest {
         match self {
             Self::OwnerData { deadline, .. }
             | Self::ExternalTargets { deadline, .. }
-            | Self::ExternalData { deadline, .. } => *deadline,
+            | Self::ExternalData { deadline, .. }
+            | Self::ExternalIncrData { deadline, .. }
+            | Self::OwnerIncrData { deadline, .. } => *deadline,
         }
     }
 
@@ -76,6 +100,7 @@ impl PendingRequest {
                     && (event.property == *property || event.property == AtomEnum::NONE.into())
             }
             Self::OwnerData { .. } => false,
+            Self::ExternalIncrData { .. } | Self::OwnerIncrData { .. } => false,
         }
     }
 }
@@ -146,6 +171,9 @@ fn run_x11(
         atom: AtomEnum::ATOM.into(),
         integer: AtomEnum::INTEGER.into(),
     };
+    if let Err(error) = select_xfixes_clipboard_events(&conn, window, atoms.clipboard) {
+        callbacks.notify_error(Status::Unsupported, &error);
+    }
     conn.flush()
         .map_err(|error| format!("failed to initialize X11 clipboard window: {error}"))?;
 
@@ -168,6 +196,26 @@ fn intern(conn: &RustConnection, name: &[u8]) -> Result<Atom, String> {
         .reply()
         .map_err(|error| format!("failed to read atom {:?}: {error}", name))
         .map(|reply| reply.atom)
+}
+
+fn select_xfixes_clipboard_events(
+    conn: &RustConnection,
+    window: Window,
+    clipboard: Atom,
+) -> Result<(), String> {
+    conn.xfixes_query_version(5, 0)
+        .map_err(|error| format!("XFixes unavailable for clipboard owner tracking: {error}"))?
+        .reply()
+        .map_err(|error| format!("XFixes unavailable for clipboard owner tracking: {error}"))?;
+    conn.xfixes_select_selection_input(
+        window,
+        clipboard,
+        SelectionEventMask::SET_SELECTION_OWNER
+            | SelectionEventMask::SELECTION_WINDOW_DESTROY
+            | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+    )
+    .map_err(|error| format!("failed to subscribe to XFixes clipboard events: {error}"))?;
+    Ok(())
 }
 
 struct X11State {
@@ -325,14 +373,9 @@ impl X11State {
         } else {
             max_bytes
         };
-        if owner == 0 || owner == self.window {
-            let status = if owner == 0 {
-                Status::NotFound
-            } else {
-                Status::Unsupported
-            };
+        if owner == 0 {
             self.callbacks
-                .notify_target_data(request_id, &native_target, status, &[]);
+                .notify_target_data(request_id, &native_target, Status::NotFound, &[]);
             return Ok(request_id);
         }
         let target_atom = match intern(&self.conn, native_target.as_bytes()) {
@@ -373,12 +416,14 @@ impl X11State {
     fn clear_selection(&mut self) -> Result<(), String> {
         self.published.clear();
         self.pending.clear();
-        self.conn
-            .set_selection_owner(0_u32, self.atoms.clipboard, CLIPBUS_X11_CURRENT_TIME)
-            .map_err(|error| format!("failed to clear CLIPBOARD selection: {error}"))?;
-        self.conn
-            .flush()
-            .map_err(|error| format!("failed to flush CLIPBOARD clear: {error}"))?;
+        if self.current_selection_owner()? == self.window {
+            self.conn
+                .set_selection_owner(0_u32, self.atoms.clipboard, CLIPBUS_X11_CURRENT_TIME)
+                .map_err(|error| format!("failed to clear CLIPBOARD selection: {error}"))?;
+            self.conn
+                .flush()
+                .map_err(|error| format!("failed to flush CLIPBOARD clear: {error}"))?;
+        }
         Ok(())
     }
 
@@ -386,6 +431,8 @@ impl X11State {
         match event {
             Event::SelectionRequest(event) => self.handle_selection_request(event),
             Event::SelectionNotify(event) => self.handle_selection_notify(event),
+            Event::PropertyNotify(event) => self.handle_property_notify(event),
+            Event::XfixesSelectionNotify(event) => self.handle_xfixes_selection_notify(event),
             Event::SelectionClear(_) => {
                 self.published.clear();
                 self.pending.clear();
@@ -467,7 +514,52 @@ impl X11State {
                 ..
             } => self.complete_external_data(request_id, property, &native_target, max_bytes),
             PendingRequest::OwnerData { .. } => Ok(()),
+            PendingRequest::ExternalIncrData { .. } | PendingRequest::OwnerIncrData { .. } => {
+                Ok(())
+            }
         }
+    }
+
+    fn handle_property_notify(&mut self, event: PropertyNotifyEvent) -> Result<(), String> {
+        if event.window == self.window && event.state == Property::NEW_VALUE {
+            if let Some(request_id) = self.pending.iter().find_map(|(request_id, pending)| {
+                matches!(
+                    pending,
+                    PendingRequest::ExternalIncrData { property, .. } if *property == event.atom
+                )
+                .then_some(*request_id)
+            }) {
+                return self.read_external_incr_chunk(request_id);
+            }
+        }
+
+        if event.state == Property::DELETE {
+            if let Some(request_id) = self.pending.iter().find_map(|(request_id, pending)| {
+                matches!(
+                    pending,
+                    PendingRequest::OwnerIncrData {
+                        requestor,
+                        property,
+                        ..
+                    } if *requestor == event.window && *property == event.atom
+                )
+                .then_some(*request_id)
+            }) {
+                return self.send_next_owner_incr_chunk(request_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_xfixes_selection_notify(
+        &self,
+        event: XfixesSelectionNotifyEvent,
+    ) -> Result<(), String> {
+        if event.selection == self.atoms.clipboard && event.owner != self.window {
+            self.callbacks.notify_targets_changed();
+        }
+        Ok(())
     }
 
     fn respond_targets(&self, event: &SelectionRequestEvent) -> Result<(), String> {
@@ -542,6 +634,9 @@ impl X11State {
         if data.len() as u64 > target.max_bytes {
             return self.fail_selection_request(&event);
         }
+        if data.len() > self.inline_data_limit() {
+            return self.begin_owner_incr_request(request_id, event, target, data.to_vec());
+        }
         let property = self.response_property(&event);
         self.conn
             .change_property8(
@@ -553,6 +648,48 @@ impl X11State {
             )
             .map_err(|error| format!("failed to write target data: {error}"))?;
         self.send_selection_notify(&event, property)
+    }
+
+    fn begin_owner_incr_request(
+        &mut self,
+        request_id: u64,
+        event: SelectionRequestEvent,
+        target: PublishedTarget,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        let property = self.response_property(&event);
+        self.conn
+            .change_window_attributes(
+                event.requestor,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|error| {
+                format!("failed to subscribe to INCR requestor property events: {error}")
+            })?;
+        let lower_bound = data.len().min(u32::MAX as usize) as u32;
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                event.requestor,
+                property,
+                self.atoms.incr,
+                &[lower_bound],
+            )
+            .map_err(|error| format!("failed to write INCR header: {error}"))?;
+        self.send_selection_notify(&event, property)?;
+        self.pending.insert(
+            request_id,
+            PendingRequest::OwnerIncrData {
+                requestor: event.requestor,
+                property,
+                target_atom: target.atom,
+                data,
+                offset: 0,
+                chunk_size: self.incr_chunk_size(),
+                deadline: Instant::now() + Duration::from_millis(self.options.request_timeout_ms),
+            },
+        );
+        Ok(())
     }
 
     fn expire_pending(&mut self) -> Result<(), String> {
@@ -570,6 +707,7 @@ impl X11State {
                     PendingRequest::OwnerData { event, .. } => {
                         self.fail_selection_request(&event)?;
                     }
+                    PendingRequest::OwnerIncrData { .. } => {}
                     other => {
                         self.notify_external_pending_failure(request_id, other, Status::Timeout)
                     }
@@ -607,7 +745,7 @@ impl X11State {
     }
 
     fn complete_external_data(
-        &self,
+        &mut self,
         request_id: u64,
         property: Atom,
         native_target: &str,
@@ -624,6 +762,9 @@ impl X11State {
             .map_err(|error| format!("failed to request target property: {error}"))?
             .reply()
             .map_err(|error| format!("failed to read target property: {error}"))?;
+        if reply.type_ == self.atoms.incr {
+            return self.begin_external_incr_read(request_id, property, native_target, max_bytes);
+        }
         let status = if reply.type_ == self.atoms.incr
             || reply.bytes_after != 0
             || reply.value.len() as u64 > max_bytes
@@ -644,6 +785,136 @@ impl X11State {
         Ok(())
     }
 
+    fn begin_external_incr_read(
+        &mut self,
+        request_id: u64,
+        property: Atom,
+        native_target: &str,
+        max_bytes: u64,
+    ) -> Result<(), String> {
+        let reply = self
+            .conn
+            .get_property(false, self.window, property, self.atoms.incr, 0, 1)
+            .map_err(|error| format!("failed to request INCR header: {error}"))?
+            .reply()
+            .map_err(|error| format!("failed to read INCR header: {error}"))?;
+        let expected_bytes = reply
+            .value32()
+            .and_then(|mut values| values.next())
+            .unwrap_or(0) as u64;
+        if expected_bytes > max_bytes {
+            let _ = self.conn.delete_property(self.window, property);
+            let _ = self.conn.flush();
+            self.callbacks
+                .notify_target_data(request_id, native_target, Status::Unsupported, &[]);
+            return Ok(());
+        }
+        self.conn
+            .delete_property(self.window, property)
+            .map_err(|error| format!("failed to delete INCR header property: {error}"))?;
+        self.conn
+            .flush()
+            .map_err(|error| format!("failed to flush INCR header deletion: {error}"))?;
+        let capacity = expected_bytes.min(max_bytes).min(usize::MAX as u64) as usize;
+        self.pending.insert(
+            request_id,
+            PendingRequest::ExternalIncrData {
+                property,
+                native_target: native_target.to_owned(),
+                max_bytes,
+                data: Vec::with_capacity(capacity),
+                deadline: Instant::now() + Duration::from_millis(self.options.request_timeout_ms),
+            },
+        );
+        Ok(())
+    }
+
+    fn read_external_incr_chunk(&mut self, request_id: u64) -> Result<(), String> {
+        let Some(PendingRequest::ExternalIncrData {
+            property,
+            native_target,
+            max_bytes,
+            mut data,
+            deadline,
+        }) = self.pending.remove(&request_id)
+        else {
+            return Ok(());
+        };
+        let remaining = max_bytes.saturating_sub(data.len() as u64);
+        let units = property_units_for_bytes(remaining);
+        let reply = self
+            .conn
+            .get_property(true, self.window, property, AtomEnum::ANY, 0, units)
+            .map_err(|error| format!("failed to request INCR data chunk: {error}"))?
+            .reply()
+            .map_err(|error| format!("failed to read INCR data chunk: {error}"))?;
+        if reply.value.is_empty() && reply.bytes_after == 0 {
+            let _ = self.conn.flush();
+            self.callbacks
+                .notify_target_data(request_id, &native_target, Status::Ok, &data);
+            return Ok(());
+        }
+        if reply.bytes_after != 0 || reply.value.len() as u64 > remaining {
+            let _ = self.conn.delete_property(self.window, property);
+            let _ = self.conn.flush();
+            self.callbacks
+                .notify_target_data(request_id, &native_target, Status::Unsupported, &[]);
+            return Ok(());
+        }
+        data.extend_from_slice(&reply.value);
+        let _ = self.conn.flush();
+        self.pending.insert(
+            request_id,
+            PendingRequest::ExternalIncrData {
+                property,
+                native_target,
+                max_bytes,
+                data,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+
+    fn send_next_owner_incr_chunk(&mut self, request_id: u64) -> Result<(), String> {
+        let Some(PendingRequest::OwnerIncrData {
+            requestor,
+            property,
+            target_atom,
+            data,
+            offset,
+            chunk_size,
+            deadline,
+        }) = self.pending.remove(&request_id)
+        else {
+            return Ok(());
+        };
+        let end = offset.saturating_add(chunk_size).min(data.len());
+        let chunk = &data[offset..end];
+        self.conn
+            .change_property8(PropMode::REPLACE, requestor, property, target_atom, chunk)
+            .map_err(|error| format!("failed to write INCR data chunk: {error}"))?;
+        self.conn
+            .flush()
+            .map_err(|error| format!("failed to flush INCR data chunk: {error}"))?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        self.pending.insert(
+            request_id,
+            PendingRequest::OwnerIncrData {
+                requestor,
+                property,
+                target_atom,
+                data,
+                offset: end,
+                chunk_size,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+
     fn notify_external_pending_failure(
         &self,
         request_id: u64,
@@ -658,7 +929,11 @@ impl X11State {
                 self.callbacks
                     .notify_target_data(request_id, &native_target, status, &[]);
             }
-            PendingRequest::OwnerData { .. } => {}
+            PendingRequest::ExternalIncrData { native_target, .. } => {
+                self.callbacks
+                    .notify_target_data(request_id, &native_target, status, &[]);
+            }
+            PendingRequest::OwnerData { .. } | PendingRequest::OwnerIncrData { .. } => {}
         }
     }
 
@@ -714,9 +989,42 @@ impl X11State {
             .map_err(|error| format!("failed to read atom name: {error}"))
             .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
     }
+
+    fn current_selection_owner(&self) -> Result<Window, String> {
+        self.conn
+            .get_selection_owner(self.atoms.clipboard)
+            .map_err(|error| format!("failed to request CLIPBOARD owner: {error}"))?
+            .reply()
+            .map_err(|error| format!("failed to read CLIPBOARD owner: {error}"))
+            .map(|reply| reply.owner)
+    }
+
+    fn inline_data_limit(&self) -> usize {
+        (self.options.max_inline_bytes.min(usize::MAX as u64) as usize)
+            .min(self.max_change_property_payload_bytes())
+    }
+
+    fn incr_chunk_size(&self) -> usize {
+        CLIPBUS_X11_INCR_CHUNK_BYTES.min(self.max_change_property_payload_bytes())
+    }
+
+    fn max_change_property_payload_bytes(&self) -> usize {
+        self.conn
+            .maximum_request_bytes()
+            .saturating_sub(1024)
+            .max(1)
+    }
 }
 
 enum LoopState {
     Continue,
     Stop,
+}
+
+fn property_units_for_bytes(bytes: u64) -> u32 {
+    bytes
+        .saturating_add(3)
+        .checked_div(4)
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32
 }

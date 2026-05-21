@@ -79,6 +79,12 @@ cp examples/minimal_owner.c "$build_dir/"
     | grep -q "NEEDED.*libclipbus.so.$soname_major" \
     || fail "example does not depend on libclipbus.so.$soname_major"
 
+cp examples/x11_self_smoke.c "$build_dir/"
+"$cc_bin" -std=c11 -Wall -Wextra -Werror \
+    "$build_dir/x11_self_smoke.c" $pkg_flags \
+    "-Wl,-rpath,$prefix/lib" \
+    -o "$build_dir/x11_self_smoke"
+
 cmake_consumer="$work_dir/cmake-consumer"
 mkdir -p "$cmake_consumer"
 cp examples/minimal_owner.c "$cmake_consumer/main.c"
