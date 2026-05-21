@@ -1,6 +1,7 @@
 use crate::abi::{
-    clipbus_error_cb, clipbus_owner_lost_cb, clipbus_status, clipbus_target_data_cb,
-    clipbus_target_list_cb, clipbus_target_request_cb, clipbus_targets_changed_cb,
+    clipbus_error_cb, clipbus_owner_lost_cb, clipbus_status, clipbus_stream_ready_cb,
+    clipbus_target_data_cb, clipbus_target_list_cb, clipbus_target_request_cb,
+    clipbus_targets_changed_cb,
 };
 use crate::x11;
 use std::ffi::{c_void, CString};
@@ -48,6 +49,7 @@ pub struct Callbacks {
     pub error: clipbus_error_cb,
     pub target_list: clipbus_target_list_cb,
     pub target_data: clipbus_target_data_cb,
+    pub stream_ready: clipbus_stream_ready_cb,
 }
 
 impl Callbacks {
@@ -175,6 +177,30 @@ impl Callbacks {
             )
         };
     }
+
+    pub fn notify_stream_ready(
+        self,
+        request_id: u64,
+        native_target: &str,
+        max_chunk_bytes: u64,
+        timeout_ms: u64,
+    ) {
+        let Some(callback) = self.stream_ready else {
+            return;
+        };
+        let Ok(native_target) = CString::new(native_target) else {
+            return;
+        };
+        unsafe {
+            callback(
+                self.user_ptr(),
+                request_id,
+                native_target.as_ptr(),
+                max_chunk_bytes,
+                timeout_ms,
+            )
+        };
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -193,6 +219,18 @@ pub enum Command {
         request_id: u64,
         status: Status,
         data: Vec<u8>,
+    },
+    BeginRequestStream {
+        request_id: u64,
+        estimated_bytes: u64,
+    },
+    WriteRequestStream {
+        request_id: u64,
+        data: Vec<u8>,
+    },
+    EndRequestStream {
+        request_id: u64,
+        status: Status,
     },
     RequestTargets {
         reply: SyncSender<Result<u64, Status>>,
@@ -322,6 +360,21 @@ impl Clipboard {
             status,
             data,
         })
+    }
+
+    pub fn begin_request_stream(&self, request_id: u64, estimated_bytes: u64) -> Status {
+        self.send(Command::BeginRequestStream {
+            request_id,
+            estimated_bytes,
+        })
+    }
+
+    pub fn write_request_stream(&self, request_id: u64, data: Vec<u8>) -> Status {
+        self.send(Command::WriteRequestStream { request_id, data })
+    }
+
+    pub fn end_request_stream(&self, request_id: u64, status: Status) -> Status {
+        self.send(Command::EndRequestStream { request_id, status })
     }
 
     fn send(&self, command: Command) -> Status {

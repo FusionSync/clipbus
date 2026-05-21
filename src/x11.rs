@@ -74,6 +74,51 @@ enum PendingRequest {
         chunk_size: usize,
         deadline: Instant,
     },
+    OwnerIncrStream {
+        requestor: Window,
+        property: Atom,
+        target_atom: Atom,
+        native_target: String,
+        max_bytes: u64,
+        written_bytes: u64,
+        chunk_size: usize,
+        ready: bool,
+        queued_chunk: Option<Vec<u8>>,
+        queued_end: Option<Status>,
+        deadline: Instant,
+    },
+}
+
+struct OwnerIncrStreamState {
+    requestor: Window,
+    property: Atom,
+    target_atom: Atom,
+    native_target: String,
+    max_bytes: u64,
+    written_bytes: u64,
+    chunk_size: usize,
+    ready: bool,
+    queued_chunk: Option<Vec<u8>>,
+    queued_end: Option<Status>,
+    deadline: Instant,
+}
+
+impl From<OwnerIncrStreamState> for PendingRequest {
+    fn from(stream: OwnerIncrStreamState) -> Self {
+        Self::OwnerIncrStream {
+            requestor: stream.requestor,
+            property: stream.property,
+            target_atom: stream.target_atom,
+            native_target: stream.native_target,
+            max_bytes: stream.max_bytes,
+            written_bytes: stream.written_bytes,
+            chunk_size: stream.chunk_size,
+            ready: stream.ready,
+            queued_chunk: stream.queued_chunk,
+            queued_end: stream.queued_end,
+            deadline: stream.deadline,
+        }
+    }
 }
 
 impl PendingRequest {
@@ -83,7 +128,8 @@ impl PendingRequest {
             | Self::ExternalTargets { deadline, .. }
             | Self::ExternalData { deadline, .. }
             | Self::ExternalIncrData { deadline, .. }
-            | Self::OwnerIncrData { deadline, .. } => *deadline,
+            | Self::OwnerIncrData { deadline, .. }
+            | Self::OwnerIncrStream { deadline, .. } => *deadline,
         }
     }
 
@@ -102,7 +148,9 @@ impl PendingRequest {
                     && (event.property == *property || event.property == AtomEnum::NONE.into())
             }
             Self::OwnerData { .. } => false,
-            Self::ExternalIncrData { .. } | Self::OwnerIncrData { .. } => false,
+            Self::ExternalIncrData { .. }
+            | Self::OwnerIncrData { .. }
+            | Self::OwnerIncrStream { .. } => false,
         }
     }
 }
@@ -134,7 +182,12 @@ pub fn run_fake(callbacks: Callbacks, receiver: Receiver<Command>) {
                 callbacks.notify_target_data(request_id, &native_target, Status::Unsupported, &[]);
             }
             Command::Stop => break,
-            Command::PublishTargets(_) | Command::Clear | Command::CompleteRequest { .. } => {}
+            Command::PublishTargets(_)
+            | Command::Clear
+            | Command::CompleteRequest { .. }
+            | Command::BeginRequestStream { .. }
+            | Command::WriteRequestStream { .. }
+            | Command::EndRequestStream { .. } => {}
         }
     }
 }
@@ -292,6 +345,16 @@ impl X11State {
                     status,
                     data,
                 }) => self.complete_request(request_id, status, &data)?,
+                Ok(Command::BeginRequestStream {
+                    request_id,
+                    estimated_bytes,
+                }) => self.begin_request_stream(request_id, estimated_bytes)?,
+                Ok(Command::WriteRequestStream { request_id, data }) => {
+                    self.write_request_stream(request_id, data)?
+                }
+                Ok(Command::EndRequestStream { request_id, status }) => {
+                    self.end_request_stream(request_id, status)?
+                }
                 Ok(Command::RequestTargets { reply }) => {
                     let _ = reply.send(self.request_external_targets());
                 }
@@ -550,9 +613,9 @@ impl X11State {
                 ..
             } => self.complete_external_data(request_id, property, &native_target, max_bytes),
             PendingRequest::OwnerData { .. } => Ok(()),
-            PendingRequest::ExternalIncrData { .. } | PendingRequest::OwnerIncrData { .. } => {
-                Ok(())
-            }
+            PendingRequest::ExternalIncrData { .. }
+            | PendingRequest::OwnerIncrData { .. }
+            | PendingRequest::OwnerIncrStream { .. } => Ok(()),
         }
     }
 
@@ -570,18 +633,26 @@ impl X11State {
         }
 
         if event.state == Property::DELETE {
-            if let Some(request_id) = self.pending.iter().find_map(|(request_id, pending)| {
-                matches!(
-                    pending,
-                    PendingRequest::OwnerIncrData {
-                        requestor,
-                        property,
-                        ..
-                    } if *requestor == event.window && *property == event.atom
-                )
-                .then_some(*request_id)
-            }) {
-                return self.send_next_owner_incr_chunk(request_id);
+            if let Some(request_id) =
+                self.pending
+                    .iter()
+                    .find_map(|(request_id, pending)| match pending {
+                        PendingRequest::OwnerIncrData {
+                            requestor,
+                            property,
+                            ..
+                        }
+                        | PendingRequest::OwnerIncrStream {
+                            requestor,
+                            property,
+                            ..
+                        } if *requestor == event.window && *property == event.atom => {
+                            Some(*request_id)
+                        }
+                        _ => None,
+                    })
+            {
+                return self.advance_owner_incr_request(request_id);
             }
         }
 
@@ -728,6 +799,188 @@ impl X11State {
         Ok(())
     }
 
+    fn begin_request_stream(
+        &mut self,
+        request_id: u64,
+        estimated_bytes: u64,
+    ) -> Result<(), String> {
+        let Some(PendingRequest::OwnerData {
+            event,
+            target,
+            deadline: _,
+        }) = self.pending.remove(&request_id)
+        else {
+            self.callbacks
+                .notify_error(Status::NotFound, "stream begin request id was not pending");
+            return Ok(());
+        };
+        if estimated_bytes > target.max_bytes {
+            self.callbacks.notify_error(
+                Status::InvalidArgument,
+                "stream estimated bytes exceeds target limit",
+            );
+            return self.fail_selection_request(&event);
+        }
+
+        let property = self.response_property(&event);
+        self.conn
+            .change_window_attributes(
+                event.requestor,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|error| {
+                format!("failed to subscribe to streaming INCR requestor events: {error}")
+            })?;
+        let lower_bound = estimated_bytes.min(u32::MAX as u64) as u32;
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                event.requestor,
+                property,
+                self.atoms.incr,
+                &[lower_bound],
+            )
+            .map_err(|error| format!("failed to write streaming INCR header: {error}"))?;
+        self.send_selection_notify(&event, property)?;
+        self.pending.insert(
+            request_id,
+            PendingRequest::OwnerIncrStream {
+                requestor: event.requestor,
+                property,
+                target_atom: target.atom,
+                native_target: target.name,
+                max_bytes: target.max_bytes,
+                written_bytes: 0,
+                chunk_size: self.incr_chunk_size(),
+                ready: false,
+                queued_chunk: None,
+                queued_end: None,
+                deadline: Instant::now() + Duration::from_millis(self.options.request_timeout_ms),
+            },
+        );
+        Ok(())
+    }
+
+    fn write_request_stream(&mut self, request_id: u64, data: Vec<u8>) -> Result<(), String> {
+        let Some(PendingRequest::OwnerIncrStream {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready,
+            queued_chunk,
+            queued_end,
+            deadline,
+        }) = self.pending.remove(&request_id)
+        else {
+            self.callbacks
+                .notify_error(Status::NotFound, "stream write request id was not pending");
+            return Ok(());
+        };
+
+        let mut stream = OwnerIncrStreamState {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready,
+            queued_chunk,
+            queued_end,
+            deadline,
+        };
+
+        if data.is_empty() || data.len() > stream.chunk_size {
+            self.callbacks.notify_error(
+                Status::InvalidArgument,
+                "stream chunk is empty or exceeds max_chunk_bytes",
+            );
+            self.pending
+                .insert(request_id, PendingRequest::from(stream));
+            return Ok(());
+        }
+        if stream.written_bytes.saturating_add(data.len() as u64) > stream.max_bytes {
+            self.callbacks
+                .notify_error(Status::InvalidArgument, "stream exceeds target limit");
+            self.abort_owner_stream(request_id, stream)?;
+            return Ok(());
+        }
+        if stream.queued_end.is_some() {
+            self.callbacks.notify_error(
+                Status::InvalidArgument,
+                "stream chunk written after stream end was queued",
+            );
+            self.pending
+                .insert(request_id, PendingRequest::from(stream));
+            return Ok(());
+        }
+        if stream.ready {
+            self.write_owner_stream_chunk(request_id, stream, data)
+        } else if stream.queued_chunk.is_none() {
+            stream.queued_chunk = Some(data);
+            stream.deadline = self.owner_request_deadline();
+            self.pending
+                .insert(request_id, PendingRequest::from(stream));
+            Ok(())
+        } else {
+            self.callbacks.notify_error(
+                Status::Pending,
+                "stream already has a queued chunk waiting for requestor readiness",
+            );
+            self.pending
+                .insert(request_id, PendingRequest::from(stream));
+            Ok(())
+        }
+    }
+
+    fn end_request_stream(&mut self, request_id: u64, status: Status) -> Result<(), String> {
+        let Some(PendingRequest::OwnerIncrStream {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready,
+            queued_chunk,
+            queued_end,
+            deadline,
+        }) = self.pending.remove(&request_id)
+        else {
+            self.callbacks
+                .notify_error(Status::NotFound, "stream end request id was not pending");
+            return Ok(());
+        };
+
+        let mut stream = OwnerIncrStreamState {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready,
+            queued_chunk,
+            queued_end,
+            deadline,
+        };
+        if status != Status::Ok {
+            stream.queued_chunk = None;
+            self.callbacks
+                .notify_error(status, "stream ended with non-ok status");
+        }
+        stream.queued_end = Some(status);
+        stream.deadline = self.owner_request_deadline();
+        self.advance_owner_stream(request_id, stream)
+    }
+
     fn expire_pending(&mut self) -> Result<(), String> {
         let now = Instant::now();
         let expired: Vec<u64> = self
@@ -743,7 +996,27 @@ impl X11State {
                     PendingRequest::OwnerData { event, .. } => {
                         self.fail_selection_request(&event)?;
                     }
-                    PendingRequest::OwnerIncrData { .. } => {}
+                    PendingRequest::OwnerIncrData {
+                        requestor,
+                        property,
+                        target_atom,
+                        ..
+                    }
+                    | PendingRequest::OwnerIncrStream {
+                        requestor,
+                        property,
+                        target_atom,
+                        ..
+                    } => {
+                        let _ = self.conn.change_property8(
+                            PropMode::REPLACE,
+                            requestor,
+                            property,
+                            target_atom,
+                            &[],
+                        );
+                        let _ = self.conn.flush();
+                    }
                     other => {
                         self.notify_external_pending_failure(request_id, other, Status::Timeout)
                     }
@@ -912,6 +1185,134 @@ impl X11State {
         Ok(())
     }
 
+    fn advance_owner_incr_request(&mut self, request_id: u64) -> Result<(), String> {
+        match self.pending.get(&request_id) {
+            Some(PendingRequest::OwnerIncrData { .. }) => {
+                self.send_next_owner_incr_chunk(request_id)
+            }
+            Some(PendingRequest::OwnerIncrStream { .. }) => {
+                self.mark_owner_stream_ready(request_id)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn mark_owner_stream_ready(&mut self, request_id: u64) -> Result<(), String> {
+        let Some(PendingRequest::OwnerIncrStream {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready: _,
+            queued_chunk,
+            queued_end,
+            deadline: _,
+        }) = self.pending.remove(&request_id)
+        else {
+            return Ok(());
+        };
+        let stream = OwnerIncrStreamState {
+            requestor,
+            property,
+            target_atom,
+            native_target,
+            max_bytes,
+            written_bytes,
+            chunk_size,
+            ready: true,
+            queued_chunk,
+            queued_end,
+            deadline: self.owner_request_deadline(),
+        };
+        self.advance_owner_stream(request_id, stream)
+    }
+
+    fn advance_owner_stream(
+        &mut self,
+        request_id: u64,
+        mut stream: OwnerIncrStreamState,
+    ) -> Result<(), String> {
+        if !stream.ready {
+            self.pending
+                .insert(request_id, PendingRequest::from(stream));
+            return Ok(());
+        }
+        if let Some(chunk) = stream.queued_chunk.take() {
+            return self.write_owner_stream_chunk(request_id, stream, chunk);
+        }
+        if stream.queued_end.is_some() {
+            return self.finish_owner_stream(request_id, stream);
+        }
+        stream.deadline = self.owner_request_deadline();
+        self.callbacks.notify_stream_ready(
+            request_id,
+            &stream.native_target,
+            stream.chunk_size as u64,
+            self.options.request_timeout_ms,
+        );
+        self.pending
+            .insert(request_id, PendingRequest::from(stream));
+        Ok(())
+    }
+
+    fn write_owner_stream_chunk(
+        &mut self,
+        request_id: u64,
+        mut stream: OwnerIncrStreamState,
+        chunk: Vec<u8>,
+    ) -> Result<(), String> {
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                stream.requestor,
+                stream.property,
+                stream.target_atom,
+                &chunk,
+            )
+            .map_err(|error| format!("failed to write streaming INCR chunk: {error}"))?;
+        self.conn
+            .flush()
+            .map_err(|error| format!("failed to flush streaming INCR chunk: {error}"))?;
+        stream.written_bytes = stream.written_bytes.saturating_add(chunk.len() as u64);
+        stream.ready = false;
+        stream.deadline = self.owner_request_deadline();
+        self.pending
+            .insert(request_id, PendingRequest::from(stream));
+        Ok(())
+    }
+
+    fn finish_owner_stream(
+        &mut self,
+        _request_id: u64,
+        stream: OwnerIncrStreamState,
+    ) -> Result<(), String> {
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                stream.requestor,
+                stream.property,
+                stream.target_atom,
+                &[],
+            )
+            .map_err(|error| format!("failed to write streaming INCR terminator: {error}"))?;
+        self.conn
+            .flush()
+            .map_err(|error| format!("failed to flush streaming INCR terminator: {error}"))
+    }
+
+    fn abort_owner_stream(
+        &mut self,
+        request_id: u64,
+        mut stream: OwnerIncrStreamState,
+    ) -> Result<(), String> {
+        stream.queued_chunk = None;
+        stream.queued_end = Some(Status::InvalidArgument);
+        self.advance_owner_stream(request_id, stream)
+    }
+
     fn send_next_owner_incr_chunk(&mut self, request_id: u64) -> Result<(), String> {
         let Some(PendingRequest::OwnerIncrData {
             requestor,
@@ -969,7 +1370,9 @@ impl X11State {
                 self.callbacks
                     .notify_target_data(request_id, &native_target, status, &[]);
             }
-            PendingRequest::OwnerData { .. } | PendingRequest::OwnerIncrData { .. } => {}
+            PendingRequest::OwnerData { .. }
+            | PendingRequest::OwnerIncrData { .. }
+            | PendingRequest::OwnerIncrStream { .. } => {}
         }
     }
 
@@ -1049,6 +1452,10 @@ impl X11State {
             .maximum_request_bytes()
             .saturating_sub(1024)
             .max(1)
+    }
+
+    fn owner_request_deadline(&self) -> Instant {
+        Instant::now() + Duration::from_millis(self.options.request_timeout_ms)
     }
 }
 

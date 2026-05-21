@@ -14,6 +14,8 @@ static const uint8_t k_payload[] =
 
 struct smoke_context {
     clipbus_clipboard_t* clipboard;
+    clipbus_request_id_t stream_request_id;
+    size_t stream_offset;
     atomic_int saw_targets;
     atomic_int saw_data;
     atomic_int saw_error;
@@ -54,13 +56,55 @@ static clipbus_status_t on_target_request(
     if (strcmp(native_target, "text/plain") != 0) {
         return CLIPBUS_UNSUPPORTED;
     }
-    clipbus_status_t status = clipbus_clipboard_complete_request(
+    context->stream_request_id = request_id;
+    context->stream_offset = 0;
+    clipbus_status_t status = clipbus_clipboard_begin_request_stream(
         context->clipboard,
         request_id,
-        CLIPBUS_OK,
-        k_payload,
         sizeof(k_payload) - 1);
     return status == CLIPBUS_OK ? CLIPBUS_PENDING : status;
+}
+
+static void on_stream_ready(
+    void* user,
+    clipbus_request_id_t request_id,
+    const char* native_target,
+    uint64_t max_chunk_bytes,
+    uint64_t timeout_ms)
+{
+    (void)timeout_ms;
+
+    struct smoke_context* context = (struct smoke_context*)user;
+    if (request_id != context->stream_request_id ||
+        strcmp(native_target, "text/plain") != 0) {
+        atomic_store(&context->saw_error, 1);
+        return;
+    }
+    const size_t payload_len = sizeof(k_payload) - 1;
+    if (context->stream_offset >= payload_len) {
+        clipbus_clipboard_end_request_stream(
+            context->clipboard,
+            request_id,
+            CLIPBUS_OK);
+        return;
+    }
+    size_t chunk_len = payload_len - context->stream_offset;
+    if (chunk_len > 17) {
+        chunk_len = 17;
+    }
+    if (chunk_len > max_chunk_bytes) {
+        chunk_len = (size_t)max_chunk_bytes;
+    }
+    if (chunk_len == 0) {
+        atomic_store(&context->saw_error, 1);
+        return;
+    }
+    clipbus_clipboard_write_request_stream(
+        context->clipboard,
+        request_id,
+        k_payload + context->stream_offset,
+        chunk_len);
+    context->stream_offset += chunk_len;
 }
 
 static void on_target_list(
@@ -137,6 +181,7 @@ int main(void)
         .error = on_error,
         .target_list = on_target_list,
         .target_data = on_target_data,
+        .stream_ready = on_stream_ready,
     };
 
     clipbus_status_t status =

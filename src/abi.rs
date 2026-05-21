@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 
-pub const CLIPBUS_ABI_VERSION: u32 = 3;
+pub const CLIPBUS_ABI_VERSION: u32 = 4;
 
 #[repr(C)]
 pub struct clipbus_clipboard {
@@ -104,6 +104,17 @@ pub type clipbus_target_data_cb = Option<
     ),
 >;
 
+#[allow(non_camel_case_types)]
+pub type clipbus_stream_ready_cb = Option<
+    unsafe extern "C" fn(
+        user: *mut c_void,
+        request_id: clipbus_request_id_t,
+        native_target: *const c_char,
+        max_chunk_bytes: u64,
+        timeout_ms: u64,
+    ),
+>;
+
 #[repr(C)]
 pub struct clipbus_callbacks {
     pub abi_version: u32,
@@ -113,6 +124,7 @@ pub struct clipbus_callbacks {
     pub error: clipbus_error_cb,
     pub target_list: clipbus_target_list_cb,
     pub target_data: clipbus_target_data_cb,
+    pub stream_ready: clipbus_stream_ready_cb,
 }
 
 impl From<crate::clipboard::Status> for clipbus_status {
@@ -222,6 +234,7 @@ fn parse_callbacks(
         error: callbacks.error,
         target_list: callbacks.target_list,
         target_data: callbacks.target_data,
+        stream_ready: callbacks.stream_ready,
     })
 }
 
@@ -427,6 +440,57 @@ pub extern "C" fn clipbus_clipboard_complete_request(
 }
 
 #[no_mangle]
+pub extern "C" fn clipbus_clipboard_begin_request_stream(
+    clipboard: *mut clipbus_clipboard,
+    request_id: clipbus_request_id_t,
+    estimated_bytes: u64,
+) -> clipbus_status {
+    convert_result(|| {
+        let Some(clipboard) = (unsafe { clipboard.as_mut() }) else {
+            return crate::clipboard::Status::InvalidArgument;
+        };
+        clipboard
+            .inner
+            .begin_request_stream(request_id, estimated_bytes)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clipbus_clipboard_write_request_stream(
+    clipboard: *mut clipbus_clipboard,
+    request_id: clipbus_request_id_t,
+    data: *const u8,
+    data_len: usize,
+) -> clipbus_status {
+    convert_result(|| {
+        let Some(clipboard) = (unsafe { clipboard.as_mut() }) else {
+            return crate::clipboard::Status::InvalidArgument;
+        };
+        if data_len == 0 || data.is_null() {
+            return crate::clipboard::Status::InvalidArgument;
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, data_len) }.to_vec();
+        clipboard.inner.write_request_stream(request_id, bytes)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clipbus_clipboard_end_request_stream(
+    clipboard: *mut clipbus_clipboard,
+    request_id: clipbus_request_id_t,
+    status: clipbus_status,
+) -> clipbus_status {
+    convert_result(|| {
+        let Some(clipboard) = (unsafe { clipboard.as_mut() }) else {
+            return crate::clipboard::Status::InvalidArgument;
+        };
+        clipboard
+            .inner
+            .end_request_stream(request_id, status.into())
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clipbus_status_name(status: clipbus_status) -> *const c_char {
     match status {
         clipbus_status::CLIPBUS_OK => c"ok".as_ptr(),
@@ -465,6 +529,7 @@ mod tests {
             error: None,
             target_list: None,
             target_data: None,
+            stream_ready: None,
         };
         assert_eq!(
             clipbus_clipboard_create(&options, &callbacks, ptr::null_mut(), ptr::null_mut()),
@@ -490,6 +555,7 @@ mod tests {
             error: None,
             target_list: None,
             target_data: None,
+            stream_ready: None,
         };
         let mut clipboard = ptr::null_mut();
         assert_eq!(

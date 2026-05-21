@@ -17,6 +17,7 @@ Current scope:
 - bounded external target data reads
 - delayed target rendering through `clipbus_target_request_cb`
 - X11 `INCR` receive/send for large target payloads
+- owner-side streaming `INCR` send without requiring one complete data buffer
 - XFixes owner-change notification when available
 - configurable hidden owner/requestor window name
 - owner-loss and diagnostics callbacks
@@ -46,12 +47,18 @@ clipbus_clipboard_publish_targets(clipboard, targets, target_count);
 clipbus_clipboard_request_targets(clipboard, &request_id);
 clipbus_clipboard_request_target_data(clipboard, "text/plain", max_bytes, &request_id);
 clipbus_clipboard_complete_request(clipboard, request_id, CLIPBUS_OK, data, len);
+clipbus_clipboard_begin_request_stream(clipboard, request_id, estimated_len);
+clipbus_clipboard_write_request_stream(clipboard, request_id, chunk, chunk_len);
+clipbus_clipboard_end_request_stream(clipboard, request_id, CLIPBUS_OK);
 clipbus_clipboard_stop(clipboard);
 clipbus_clipboard_destroy(clipboard);
 ```
 
 Callbacks must be bounded. They may return `CLIPBUS_PENDING`; the host then
-completes the request later with `clipbus_clipboard_complete_request`.
+completes the request later with `clipbus_clipboard_complete_request` or starts
+a stream with `clipbus_clipboard_begin_request_stream`. For streaming, the host
+writes one chunk when `clipbus_stream_ready_cb` fires and ends the stream with
+`clipbus_clipboard_end_request_stream`.
 
 See `docs/design.md` for the implementation boundary and slice plan.
 
@@ -78,4 +85,5 @@ target_link_libraries(app PRIVATE Clipbus::Clipbus)
 
 For a live X11 owner/requestor smoke, build `examples/x11_self_smoke.c` against
 an installed or staged `libclipbus`. The example publishes `text/plain`, reads
-it back through the requestor API, and forces the payload through X11 `INCR`.
+it back through the requestor API, and forces the owner path through streaming
+X11 `INCR`.

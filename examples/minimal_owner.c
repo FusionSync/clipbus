@@ -35,6 +35,7 @@ int main(void)
         .error = 0,
         .target_list = 0,
         .target_data = 0,
+        .stream_ready = 0,
     };
     clipbus_clipboard_t* clipboard = 0;
     clipbus_status_t status =

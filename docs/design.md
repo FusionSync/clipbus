@@ -18,6 +18,8 @@ retrieval; `clipbus` owns native selection events.
 - requestor-side `TARGETS` and target data reads from an external owner
 - XFixes owner-change notifications when the server supports XFixes
 - X11 `INCR` receive/send for large target payloads
+- owner-side streaming `INCR` writes where the host provides one bounded chunk
+  per requestor-ready callback
 - hidden owner/requestor window naming for diagnostics and multi-product hosts
 
 The host owns:
@@ -41,6 +43,9 @@ clipbus_clipboard_publish_targets(clipboard, targets, target_count);
 clipbus_clipboard_request_targets(clipboard, &request_id);
 clipbus_clipboard_request_target_data(clipboard, "text/plain", max_bytes, &request_id);
 clipbus_clipboard_complete_request(clipboard, request_id, status, data, len);
+clipbus_clipboard_begin_request_stream(clipboard, request_id, estimated_len);
+clipbus_clipboard_write_request_stream(clipboard, request_id, chunk, chunk_len);
+clipbus_clipboard_end_request_stream(clipboard, request_id, status);
 clipbus_clipboard_stop(clipboard);
 clipbus_clipboard_destroy(clipboard);
 ```
@@ -53,6 +58,19 @@ local X11 app requests a target
   -> clipbus_target_request_cb(user, request_id, target, max_bytes, timeout)
   -> host returns Pending/Unsupported or later completes request_id
   -> clipbus writes the X11 property and sends SelectionNotify
+```
+
+Streaming owner flow:
+
+```text
+local X11 app requests a target
+  -> host calls clipbus_clipboard_begin_request_stream(request_id, estimate)
+  -> clipbus starts INCR and sends SelectionNotify
+  -> requestor deletes the property when ready for the next chunk
+  -> clipbus_stream_ready_cb(user, request_id, target, max_chunk, timeout)
+  -> host calls clipbus_clipboard_write_request_stream(request_id, chunk)
+  -> host calls clipbus_clipboard_end_request_stream(request_id, status)
+  -> clipbus writes the zero-length INCR terminator
 ```
 
 Requestor flow:
@@ -87,6 +105,8 @@ Implemented in the first slice:
 - request bounded target data from the current external owner
 - receive external `INCR` target payloads
 - send owner-side `INCR` target payloads
+- stream owner-side `INCR` target payloads without requiring one complete
+  buffer
 - notify `targets_changed` from XFixes selection owner events when available
 - request timeout cleanup
 
