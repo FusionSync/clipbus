@@ -91,7 +91,7 @@ Implemented in the first slice:
 
 Next slices:
 
-- real X server integration smoke tests
+- automated real X server integration smoke tests
 - PRIMARY selection support if FusionDesk needs it
 - Wayland/portal backend if Linux scope expands beyond X11
 
