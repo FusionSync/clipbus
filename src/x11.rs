@@ -28,6 +28,8 @@ struct Atoms {
     timestamp: Atom,
     save_targets: Atom,
     incr: Atom,
+    net_wm_name: Atom,
+    utf8_string: Atom,
     atom: Atom,
     integer: Atom,
 }
@@ -168,9 +170,12 @@ fn run_x11(
         timestamp: intern(&conn, b"TIMESTAMP")?,
         save_targets: intern(&conn, b"SAVE_TARGETS")?,
         incr: intern(&conn, b"INCR")?,
+        net_wm_name: intern(&conn, b"_NET_WM_NAME")?,
+        utf8_string: intern(&conn, b"UTF8_STRING")?,
         atom: AtomEnum::ATOM.into(),
         integer: AtomEnum::INTEGER.into(),
     };
+    set_owner_window_name(&conn, window, atoms, &options.owner_window_name)?;
     if let Err(error) = select_xfixes_clipboard_events(&conn, window, atoms.clipboard) {
         callbacks.notify_error(Status::Unsupported, &error);
     }
@@ -215,6 +220,37 @@ fn select_xfixes_clipboard_events(
             | SelectionEventMask::SELECTION_CLIENT_CLOSE,
     )
     .map_err(|error| format!("failed to subscribe to XFixes clipboard events: {error}"))?;
+    Ok(())
+}
+
+fn set_owner_window_name(
+    conn: &RustConnection,
+    window: Window,
+    atoms: Atoms,
+    name: &str,
+) -> Result<(), String> {
+    let name = name.as_bytes();
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_name,
+        atoms.utf8_string,
+        name,
+    )
+    .map_err(|error| format!("failed to set _NET_WM_NAME on clipboard window: {error}"))?;
+    let wm_name_type = if name.is_ascii() {
+        AtomEnum::STRING.into()
+    } else {
+        atoms.utf8_string
+    };
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_NAME,
+        wm_name_type,
+        name,
+    )
+    .map_err(|error| format!("failed to set WM_NAME on clipboard window: {error}"))?;
     Ok(())
 }
 

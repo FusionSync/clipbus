@@ -127,6 +127,7 @@ int main(void)
         .display_name = 0,
         .request_timeout_ms = 2000,
         .max_inline_bytes = 8,
+        .owner_window_name = "clipbus-x11-self-smoke",
     };
     clipbus_callbacks_t callbacks = {
         .abi_version = CLIPBUS_ABI_VERSION,

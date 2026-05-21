@@ -14,7 +14,7 @@ extern "C" {
 #define CLIPBUS_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define CLIPBUS_ABI_VERSION 2
+#define CLIPBUS_ABI_VERSION 3
 
 typedef struct clipbus_clipboard clipbus_clipboard_t;
 typedef uint64_t clipbus_request_id_t;
@@ -44,6 +44,7 @@ typedef struct clipbus_options {
     const char* display_name;
     uint64_t request_timeout_ms;
     uint64_t max_inline_bytes;
+    const char* owner_window_name;
 } clipbus_options_t;
 
 typedef struct clipbus_target_offer {

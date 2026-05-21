@@ -35,6 +35,7 @@ pub struct Options {
     pub display_name: Option<String>,
     pub request_timeout_ms: u64,
     pub max_inline_bytes: u64,
+    pub owner_window_name: String,
 }
 
 #[derive(Clone, Copy)]

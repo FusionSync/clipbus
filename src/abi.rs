@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 
-pub const CLIPBUS_ABI_VERSION: u32 = 2;
+pub const CLIPBUS_ABI_VERSION: u32 = 3;
 
 #[repr(C)]
 pub struct clipbus_clipboard {
@@ -45,6 +45,7 @@ pub struct clipbus_options {
     pub display_name: *const c_char,
     pub request_timeout_ms: u64,
     pub max_inline_bytes: u64,
+    pub owner_window_name: *const c_char,
 }
 
 #[repr(C)]
@@ -196,6 +197,9 @@ fn parse_options(options: *const clipbus_options) -> Result<Options, crate::clip
         } else {
             options.max_inline_bytes
         },
+        owner_window_name: str_from_ptr(options.owner_window_name)?
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "clipbus".to_owned()),
     })
 }
 
@@ -451,6 +455,7 @@ mod tests {
             display_name: ptr::null(),
             request_timeout_ms: 0,
             max_inline_bytes: 0,
+            owner_window_name: ptr::null(),
         };
         let callbacks = clipbus_callbacks {
             abi_version: CLIPBUS_ABI_VERSION,
@@ -475,6 +480,7 @@ mod tests {
             display_name: ptr::null(),
             request_timeout_ms: 0,
             max_inline_bytes: 0,
+            owner_window_name: ptr::null(),
         };
         let callbacks = clipbus_callbacks {
             abi_version: CLIPBUS_ABI_VERSION,

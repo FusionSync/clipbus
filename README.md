@@ -18,6 +18,7 @@ Current scope:
 - delayed target rendering through `clipbus_target_request_cb`
 - X11 `INCR` receive/send for large target payloads
 - XFixes owner-change notification when available
+- configurable hidden owner/requestor window name
 - owner-loss and diagnostics callbacks
 
 Out of scope for this library:
@@ -33,6 +34,11 @@ Out of scope for this library:
 The public C ABI is declared in `include/clipbus.h`.
 
 ```c
+clipbus_options_t options = {
+    .abi_version = CLIPBUS_ABI_VERSION,
+    .backend = CLIPBUS_BACKEND_X11,
+    .owner_window_name = "FusionDesk Clipboard",
+};
 clipbus_clipboard_t* clipboard = NULL;
 clipbus_clipboard_create(&options, &callbacks, user, &clipboard);
 clipbus_clipboard_start(clipboard);

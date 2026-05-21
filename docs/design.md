@@ -18,6 +18,7 @@ retrieval; `clipbus` owns native selection events.
 - requestor-side `TARGETS` and target data reads from an external owner
 - XFixes owner-change notifications when the server supports XFixes
 - X11 `INCR` receive/send for large target payloads
+- hidden owner/requestor window naming for diagnostics and multi-product hosts
 
 The host owns:
 
