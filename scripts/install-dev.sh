@@ -9,6 +9,7 @@ destdir=${DESTDIR:-}
 libdir=${LIBDIR:-"$prefix/lib"}
 includedir=${INCLUDEDIR:-"$prefix/include"}
 pkgconfigdir=${PKGCONFIGDIR:-"$libdir/pkgconfig"}
+cmakedir=${CMAKEDIR:-"$libdir/cmake/Clipbus"}
 soname_major=${SONAME_MAJOR:-0}
 build_profile=${BUILD_PROFILE:-debug}
 
@@ -75,6 +76,7 @@ ln -sfn "libclipbus.so.$soname_major" "$(install_path "$libdir/libclipbus.so")"
 install_file 0644 "$artifact_dir/libclipbus.a" "$libdir/libclipbus.a"
 
 install_text_template 0644 pkgconfig/clipbus.pc.in "$pkgconfigdir/clipbus.pc"
+install_text_template 0644 cmake/ClipbusConfig.install.cmake.in \
+    "$cmakedir/ClipbusConfig.cmake"
 
 echo "installed clipbus $version into $(install_path "$prefix")"
-

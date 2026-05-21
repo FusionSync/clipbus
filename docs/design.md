@@ -85,6 +85,7 @@ Installed files:
 <libdir>/libclipbus.so
 <libdir>/libclipbus.a
 <libdir>/pkgconfig/clipbus.pc
+<libdir>/cmake/Clipbus/ClipbusConfig.cmake
 ```
 
 Packagers should use `DESTDIR` while keeping generated metadata rooted at the
@@ -98,4 +99,11 @@ The install metadata gate is:
 
 ```sh
 tests/install-metadata.sh
+```
+
+It verifies both public consumption paths:
+
+```sh
+pkg-config --cflags --libs clipbus
+find_package(Clipbus REQUIRED)
 ```

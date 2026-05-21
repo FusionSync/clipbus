@@ -6,6 +6,7 @@ repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 cc_bin=${CC:-cc}
 pkg_config_bin=${PKG_CONFIG:-pkg-config}
 readelf_bin=${READELF:-readelf}
+cmake_bin=${CMAKE:-cmake}
 soname_major=${SONAME_MAJOR:-0}
 
 fail() {
@@ -16,6 +17,7 @@ fail() {
 command -v "$cc_bin" >/dev/null || fail "cc is required"
 command -v "$pkg_config_bin" >/dev/null || fail "pkg-config is required"
 command -v "$readelf_bin" >/dev/null || fail "readelf is required"
+command -v "$cmake_bin" >/dev/null || fail "cmake is required"
 
 unset PKG_CONFIG_SYSROOT_DIR
 
@@ -49,6 +51,8 @@ test -f "$prefix/lib/libclipbus.a" \
     || fail "static library was not installed"
 test -f "$prefix/lib/pkgconfig/clipbus.pc" \
     || fail "pkg-config file was not installed"
+test -f "$prefix/lib/cmake/Clipbus/ClipbusConfig.cmake" \
+    || fail "CMake package config was not installed"
 
 grep -q "^Version: $version$" "$prefix/lib/pkgconfig/clipbus.pc" \
     || fail "pkg-config version mismatch"
@@ -75,6 +79,20 @@ cp examples/minimal_owner.c "$build_dir/"
     | grep -q "NEEDED.*libclipbus.so.$soname_major" \
     || fail "example does not depend on libclipbus.so.$soname_major"
 
+cmake_consumer="$work_dir/cmake-consumer"
+mkdir -p "$cmake_consumer"
+cp examples/minimal_owner.c "$cmake_consumer/main.c"
+cat > "$cmake_consumer/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(clipbus_consumer LANGUAGES C)
+find_package(Clipbus REQUIRED)
+add_executable(clipbus_consumer main.c)
+target_link_libraries(clipbus_consumer PRIVATE Clipbus::Clipbus)
+EOF
+"$cmake_bin" -S "$cmake_consumer" -B "$cmake_consumer/build" \
+    -DCMAKE_PREFIX_PATH="$prefix" >/dev/null
+"$cmake_bin" --build "$cmake_consumer/build" >/dev/null
+
 stage="$work_dir/stage"
 staged_prefix=/usr
 DESTDIR="$stage" PREFIX="$staged_prefix" scripts/install-dev.sh \
@@ -83,6 +101,8 @@ test -f "$stage$staged_prefix/include/clipbus.h" \
     || fail "DESTDIR public header was not staged"
 test -f "$stage$staged_prefix/lib/libclipbus.so.$version" \
     || fail "DESTDIR shared library was not staged"
+test -f "$stage$staged_prefix/lib/cmake/Clipbus/ClipbusConfig.cmake" \
+    || fail "DESTDIR CMake package config was not staged"
 grep -q "^includedir=$staged_prefix/include$" \
     "$stage$staged_prefix/lib/pkgconfig/clipbus.pc" \
     || fail "DESTDIR pkg-config includedir incorrectly includes staging root"
@@ -91,4 +111,3 @@ grep -q "^libdir=$staged_prefix/lib$" \
     || fail "DESTDIR pkg-config libdir incorrectly includes staging root"
 
 echo "install metadata passed"
-

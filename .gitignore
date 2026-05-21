@@ -1,4 +1,5 @@
 /target/
+/build/
 *.pc
 *.a
 *.so
@@ -7,4 +8,3 @@
 *.lib
 *.pdb
 *.log
-

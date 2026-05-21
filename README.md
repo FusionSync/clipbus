@@ -56,3 +56,10 @@ The installed public boundary is:
 ```sh
 pkg-config --cflags --libs clipbus
 ```
+
+CMake consumers may also use:
+
+```cmake
+find_package(Clipbus REQUIRED)
+target_link_libraries(app PRIVATE Clipbus::Clipbus)
+```

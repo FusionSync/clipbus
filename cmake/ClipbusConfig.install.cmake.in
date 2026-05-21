@@ -1,0 +1,7 @@
+if(NOT TARGET Clipbus::Clipbus)
+    add_library(Clipbus::Clipbus SHARED IMPORTED)
+    set_target_properties(Clipbus::Clipbus PROPERTIES
+        IMPORTED_LOCATION "@libdir@/libclipbus.so"
+        INTERFACE_INCLUDE_DIRECTORIES "@includedir@")
+endif()
+
