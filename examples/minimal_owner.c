@@ -33,6 +33,8 @@ int main(void)
         .targets_changed = 0,
         .owner_lost = 0,
         .error = 0,
+        .target_list = 0,
+        .target_data = 0,
     };
     clipbus_clipboard_t* clipboard = 0;
     clipbus_status_t status =
@@ -51,4 +53,3 @@ int main(void)
     clipbus_clipboard_destroy(clipboard);
     return 0;
 }
-

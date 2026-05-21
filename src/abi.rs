@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 
-pub const CLIPBUS_ABI_VERSION: u32 = 1;
+pub const CLIPBUS_ABI_VERSION: u32 = 2;
 
 #[repr(C)]
 pub struct clipbus_clipboard {
@@ -80,6 +80,29 @@ pub type clipbus_owner_lost_cb = Option<unsafe extern "C" fn(user: *mut c_void)>
 pub type clipbus_error_cb =
     Option<unsafe extern "C" fn(user: *mut c_void, code: i32, message: *const c_char)>;
 
+#[allow(non_camel_case_types)]
+pub type clipbus_target_list_cb = Option<
+    unsafe extern "C" fn(
+        user: *mut c_void,
+        request_id: clipbus_request_id_t,
+        status: clipbus_status,
+        native_targets: *const *const c_char,
+        target_count: usize,
+    ),
+>;
+
+#[allow(non_camel_case_types)]
+pub type clipbus_target_data_cb = Option<
+    unsafe extern "C" fn(
+        user: *mut c_void,
+        request_id: clipbus_request_id_t,
+        native_target: *const c_char,
+        status: clipbus_status,
+        data: *const u8,
+        data_len: usize,
+    ),
+>;
+
 #[repr(C)]
 pub struct clipbus_callbacks {
     pub abi_version: u32,
@@ -87,6 +110,8 @@ pub struct clipbus_callbacks {
     pub targets_changed: clipbus_targets_changed_cb,
     pub owner_lost: clipbus_owner_lost_cb,
     pub error: clipbus_error_cb,
+    pub target_list: clipbus_target_list_cb,
+    pub target_data: clipbus_target_data_cb,
 }
 
 impl From<crate::clipboard::Status> for clipbus_status {
@@ -191,6 +216,8 @@ fn parse_callbacks(
         targets_changed: callbacks.targets_changed,
         owner_lost: callbacks.owner_lost,
         error: callbacks.error,
+        target_list: callbacks.target_list,
+        target_data: callbacks.target_data,
     })
 }
 
@@ -313,6 +340,63 @@ pub extern "C" fn clipbus_clipboard_clear(clipboard: *mut clipbus_clipboard) -> 
 }
 
 #[no_mangle]
+pub extern "C" fn clipbus_clipboard_request_targets(
+    clipboard: *mut clipbus_clipboard,
+    out_request_id: *mut clipbus_request_id_t,
+) -> clipbus_status {
+    convert_result(|| {
+        if out_request_id.is_null() {
+            return crate::clipboard::Status::InvalidArgument;
+        }
+        let Some(clipboard) = (unsafe { clipboard.as_mut() }) else {
+            return crate::clipboard::Status::InvalidArgument;
+        };
+        match clipboard.inner.request_targets() {
+            Ok(request_id) => {
+                unsafe {
+                    *out_request_id = request_id;
+                }
+                crate::clipboard::Status::Ok
+            }
+            Err(status) => status,
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clipbus_clipboard_request_target_data(
+    clipboard: *mut clipbus_clipboard,
+    native_target: *const c_char,
+    max_bytes: u64,
+    out_request_id: *mut clipbus_request_id_t,
+) -> clipbus_status {
+    convert_result(|| {
+        if out_request_id.is_null() {
+            return crate::clipboard::Status::InvalidArgument;
+        }
+        let Some(clipboard) = (unsafe { clipboard.as_mut() }) else {
+            return crate::clipboard::Status::InvalidArgument;
+        };
+        let native_target = match str_from_ptr(native_target) {
+            Ok(Some(native_target)) if !native_target.is_empty() => native_target,
+            _ => return crate::clipboard::Status::InvalidArgument,
+        };
+        match clipboard
+            .inner
+            .request_target_data(native_target, max_bytes)
+        {
+            Ok(request_id) => {
+                unsafe {
+                    *out_request_id = request_id;
+                }
+                crate::clipboard::Status::Ok
+            }
+            Err(status) => status,
+        }
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clipbus_clipboard_complete_request(
     clipboard: *mut clipbus_clipboard,
     request_id: clipbus_request_id_t,
@@ -374,6 +458,8 @@ mod tests {
             targets_changed: None,
             owner_lost: None,
             error: None,
+            target_list: None,
+            target_data: None,
         };
         assert_eq!(
             clipbus_clipboard_create(&options, &callbacks, ptr::null_mut(), ptr::null_mut()),
@@ -396,6 +482,8 @@ mod tests {
             targets_changed: None,
             owner_lost: None,
             error: None,
+            target_list: None,
+            target_data: None,
         };
         let mut clipboard = ptr::null_mut();
         assert_eq!(

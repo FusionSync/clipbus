@@ -1,12 +1,13 @@
 use crate::abi::{
-    clipbus_error_cb, clipbus_owner_lost_cb, clipbus_status, clipbus_target_request_cb,
-    clipbus_targets_changed_cb,
+    clipbus_error_cb, clipbus_owner_lost_cb, clipbus_status, clipbus_target_data_cb,
+    clipbus_target_list_cb, clipbus_target_request_cb, clipbus_targets_changed_cb,
 };
 use crate::x11;
 use std::ffi::{c_void, CString};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
@@ -44,6 +45,8 @@ pub struct Callbacks {
     pub targets_changed: clipbus_targets_changed_cb,
     pub owner_lost: clipbus_owner_lost_cb,
     pub error: clipbus_error_cb,
+    pub target_list: clipbus_target_list_cb,
+    pub target_data: clipbus_target_data_cb,
 }
 
 impl Callbacks {
@@ -121,6 +124,56 @@ impl Callbacks {
             unsafe { callback(self.user_ptr(), code, message.as_ptr()) };
         }
     }
+
+    pub fn notify_target_list(self, request_id: u64, status: Status, targets: &[String]) {
+        let Some(callback) = self.target_list else {
+            return;
+        };
+        let c_targets: Vec<CString> = targets
+            .iter()
+            .filter_map(|target| CString::new(target.as_str()).ok())
+            .collect();
+        let target_ptrs: Vec<*const i8> = c_targets.iter().map(|target| target.as_ptr()).collect();
+        unsafe {
+            callback(
+                self.user_ptr(),
+                request_id,
+                status.into(),
+                target_ptrs.as_ptr(),
+                target_ptrs.len(),
+            )
+        };
+    }
+
+    pub fn notify_target_data(
+        self,
+        request_id: u64,
+        native_target: &str,
+        status: Status,
+        data: &[u8],
+    ) {
+        let Some(callback) = self.target_data else {
+            return;
+        };
+        let Ok(native_target) = CString::new(native_target) else {
+            return;
+        };
+        let data_ptr = if data.is_empty() {
+            std::ptr::null()
+        } else {
+            data.as_ptr()
+        };
+        unsafe {
+            callback(
+                self.user_ptr(),
+                request_id,
+                native_target.as_ptr(),
+                status.into(),
+                data_ptr,
+                data.len(),
+            )
+        };
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +192,14 @@ pub enum Command {
         request_id: u64,
         status: Status,
         data: Vec<u8>,
+    },
+    RequestTargets {
+        reply: SyncSender<Result<u64, Status>>,
+    },
+    RequestTargetData {
+        native_target: String,
+        max_bytes: u64,
+        reply: SyncSender<Result<u64, Status>>,
     },
     Stop,
 }
@@ -222,6 +283,36 @@ impl Clipboard {
 
     pub fn clear(&self) -> Status {
         self.send(Command::Clear)
+    }
+
+    pub fn request_targets(&self) -> Result<u64, Status> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let status = self.send(Command::RequestTargets { reply });
+        if status != Status::Ok {
+            return Err(status);
+        }
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or(Err(Status::Timeout))
+    }
+
+    pub fn request_target_data(
+        &self,
+        native_target: String,
+        max_bytes: u64,
+    ) -> Result<u64, Status> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let status = self.send(Command::RequestTargetData {
+            native_target,
+            max_bytes,
+            reply,
+        });
+        if status != Status::Ok {
+            return Err(status);
+        }
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or(Err(Status::Timeout))
     }
 
     pub fn complete_request(&self, request_id: u64, status: Status, data: Vec<u8>) -> Status {

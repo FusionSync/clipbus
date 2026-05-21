@@ -33,6 +33,8 @@ clipbus_clipboard_t* clipboard = NULL;
 clipbus_clipboard_create(&options, &callbacks, user, &clipboard);
 clipbus_clipboard_start(clipboard);
 clipbus_clipboard_publish_targets(clipboard, targets, target_count);
+clipbus_clipboard_request_targets(clipboard, &request_id);
+clipbus_clipboard_request_target_data(clipboard, "text/plain", max_bytes, &request_id);
 clipbus_clipboard_complete_request(clipboard, request_id, CLIPBUS_OK, data, len);
 clipbus_clipboard_stop(clipboard);
 clipbus_clipboard_destroy(clipboard);

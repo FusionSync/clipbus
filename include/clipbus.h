@@ -14,7 +14,7 @@ extern "C" {
 #define CLIPBUS_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define CLIPBUS_ABI_VERSION 1
+#define CLIPBUS_ABI_VERSION 2
 
 typedef struct clipbus_clipboard clipbus_clipboard_t;
 typedef uint64_t clipbus_request_id_t;
@@ -64,6 +64,19 @@ typedef clipbus_status_t (*clipbus_target_request_cb)(
 typedef void (*clipbus_targets_changed_cb)(void* user);
 typedef void (*clipbus_owner_lost_cb)(void* user);
 typedef void (*clipbus_error_cb)(void* user, int code, const char* message);
+typedef void (*clipbus_target_list_cb)(
+    void* user,
+    clipbus_request_id_t request_id,
+    clipbus_status_t status,
+    const char* const* native_targets,
+    size_t target_count);
+typedef void (*clipbus_target_data_cb)(
+    void* user,
+    clipbus_request_id_t request_id,
+    const char* native_target,
+    clipbus_status_t status,
+    const uint8_t* data,
+    size_t data_len);
 
 typedef struct clipbus_callbacks {
     uint32_t abi_version;
@@ -71,6 +84,8 @@ typedef struct clipbus_callbacks {
     clipbus_targets_changed_cb targets_changed;
     clipbus_owner_lost_cb owner_lost;
     clipbus_error_cb error;
+    clipbus_target_list_cb target_list;
+    clipbus_target_data_cb target_data;
 } clipbus_callbacks_t;
 
 CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_create(
@@ -94,6 +109,16 @@ CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_publish_targets(
 
 CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_clear(
     clipbus_clipboard_t* clipboard);
+
+CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_request_targets(
+    clipbus_clipboard_t* clipboard,
+    clipbus_request_id_t* out_request_id);
+
+CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_request_target_data(
+    clipbus_clipboard_t* clipboard,
+    const char* native_target,
+    uint64_t max_bytes,
+    clipbus_request_id_t* out_request_id);
 
 CLIPBUS_EXPORT clipbus_status_t clipbus_clipboard_complete_request(
     clipbus_clipboard_t* clipboard,

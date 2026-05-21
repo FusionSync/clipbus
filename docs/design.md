@@ -15,6 +15,7 @@ retrieval; `clipbus` owns native selection events.
 - `TARGETS`, `TIMESTAMP`, and `SAVE_TARGETS` responses
 - `SelectionRequest`, `SelectionNotify`, `SelectionClear`, and property writes
 - pending request tracking and request timeout failure
+- requestor-side `TARGETS` and target data reads from an external owner
 
 The host owns:
 
@@ -34,6 +35,8 @@ clipbus_clipboard_t* clipboard;
 clipbus_clipboard_create(&options, &callbacks, user, &clipboard);
 clipbus_clipboard_start(clipboard);
 clipbus_clipboard_publish_targets(clipboard, targets, target_count);
+clipbus_clipboard_request_targets(clipboard, &request_id);
+clipbus_clipboard_request_target_data(clipboard, "text/plain", max_bytes, &request_id);
 clipbus_clipboard_complete_request(clipboard, request_id, status, data, len);
 clipbus_clipboard_stop(clipboard);
 clipbus_clipboard_destroy(clipboard);
@@ -61,13 +64,13 @@ Implemented in the first slice:
 - respond to `TARGETS`, `TIMESTAMP`, and `SAVE_TARGETS`
 - promise-style target request callback
 - complete or fail pending X11 requests
+- request `TARGETS` from the current external owner
+- request bounded target data from the current external owner
 - request timeout cleanup
 
 Next slices:
 
 - XFixes owner-change monitor for external clipboard changes
-- local target list snapshot from an external owner
-- local target read requests from an external owner
 - INCR for large inline payloads
 - better install/export targets after CMake is available in CI
 
