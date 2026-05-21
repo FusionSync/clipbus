@@ -1,0 +1,10 @@
+prefix=@prefix@
+exec_prefix=${prefix}
+includedir=@includedir@
+libdir=@libdir@
+
+Name: clipbus
+Description: Clipboard event bridge with promise-style target requests
+Version: @version@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lclipbus

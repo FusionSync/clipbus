@@ -1,0 +1,17 @@
+[package]
+name = "clipbus"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Clipboard event bridge with promise-style target requests"
+repository = "https://example.invalid/clipbus"
+build = "build.rs"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+x11rb = { version = "0.13.2", default-features = false, features = ["xfixes"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

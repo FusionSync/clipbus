@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+if(NOT TARGET Clipbus::Clipbus)
+    add_library(Clipbus::Clipbus STATIC IMPORTED)
+    set_target_properties(Clipbus::Clipbus PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/libclipbus.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
+endif()
